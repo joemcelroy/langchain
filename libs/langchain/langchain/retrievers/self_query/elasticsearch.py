@@ -29,16 +29,75 @@ class ElasticsearchTranslator(Visitor):
 
     def _format_func(self, func: Union[Operator, Comparator]) -> str:
         self._validate_func(func)
-        return f"${func.value}"
+        map_dict = {
+            Operator.OR: "should", 
+            Operator.NOT: "must_not", 
+            Operator.AND: "must",  
+            Comparator.EQ: "term",
+            Comparator.GT: "gt",
+            Comparator.GTE: "gte",
+            Comparator.LT: "lt",
+            Comparator.LTE: "lte",
+            Comparator.CONTAIN: "match",
+            Comparator.LIKE: "fuzzy",
+        }
+        return map_dict[func]
 
     def visit_operation(self, operation: Operation) -> Dict:
         args = [arg.accept(self) for arg in operation.arguments]
-        return {self._format_func(operation.operator): args}
+
+        return {
+            "bool": {
+                self._format_func(operation.operator): args
+            }
+        }
 
     def visit_comparison(self, comparison: Comparison) -> Dict:
+        
+        # ElasticsearchStore filters require to target
+        # the metadata object field
+        field = f"metadata.{comparison.attribute}"
+
+        is_range_comparator = comparison.comparator in [
+            Comparator.GT,
+            Comparator.GTE,
+            Comparator.LT,
+            Comparator.LTE,
+        ]
+
+        if is_range_comparator:
+            return {
+                "range": {
+                    field: {
+                        self._format_func(comparison.comparator): comparison.value
+                    }
+                }
+            }
+        
+        if comparison.comparator == Comparator.LIKE:
+            return {
+                self._format_func(comparison.comparator): {
+                    field: {
+                        "value": comparison.value,
+                        "fuzziness": "AUTO"
+                    }
+                }
+            }
+        
+        if comparison.comparator == Comparator.CONTAIN:
+            return {
+                self._format_func(comparison.comparator): {
+                    field: comparison.value
+                }
+            }
+        
+        # we assume that if the value is a string, 
+        # we want to use the keyword field
+        field = f"{field}.keyword" if isinstance(comparison.value, str) else field
+        
         return {
-            comparison.attribute: {
-                self._format_func(comparison.comparator): comparison.value
+            self._format_func(comparison.comparator): {
+                field: comparison.value
             }
         }
 
@@ -48,5 +107,5 @@ class ElasticsearchTranslator(Visitor):
         if structured_query.filter is None:
             kwargs = {}
         else:
-            kwargs = {"filter": structured_query.filter.accept(self)}
+            kwargs = {"filter": [structured_query.filter.accept(self)]}
         return structured_query.query, kwargs
